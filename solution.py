@@ -37,10 +37,47 @@ df_sectors = pd.read_csv('data/data0.csv')
 df_data = pd.read_csv('data/data1.csv')
 df_data['date'] = pd.to_datetime(df_data['date']).apply(lambda d: d.date())
 
-df_x = df_data[['date', 'security', 'price', 'return30', 'ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa']].copy()
+# Sharpe Ratio calculation
+def sharpe_ratio(returns, risk_free_rate=0.02):
+    excess_returns = returns - risk_free_rate
+    return excess_returns.mean() / excess_returns.std() if excess_returns.std() != 0 else 0
+
+# Beta calculation
+market_returns = df_data.groupby('date')['return30'].mean()
+
+def calculate_beta(stock_returns, market_returns):
+    # Align dates between stock and market returns
+    common_dates = stock_returns.index.intersection(market_returns.index)
+    stock_returns_aligned = stock_returns.loc[common_dates]
+    market_returns_aligned = market_returns.loc[common_dates]
+    
+    if len(stock_returns_aligned) > 1 and len(market_returns_aligned) > 1:
+        covariance = np.cov(stock_returns_aligned, market_returns_aligned)[0][1]
+        market_variance = np.var(market_returns_aligned)
+        return covariance / market_variance if market_variance != 0 else 0
+    else:
+        return 0
+
+# Apply Sharpe Ratio and Beta to each security
+df_data['sharpe_ratio'] = df_data.groupby('security')['return30'].transform(lambda x: sharpe_ratio(x))
+df_data['beta'] = df_data.groupby('security')['return30'].transform(lambda x: calculate_beta(x, market_returns))
+
+
+# Coefficient of Variation (CV) calculation
+df_data['cv'] = df_data.groupby('security')['return30'].transform(lambda x: x.std() / x.mean() if x.mean() != 0 else 0)
+
+# Calculate Covariance (can also be skipped if not needed as a feature column)
+df_covariance = df_data.pivot(index='date', columns='security', values='price').pct_change().cov()
+
+# Create df_x including the new columns for engineered features
+df_x = df_data[['date', 'security', 'price', 'return30', 'ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa', 'sharpe_ratio', 'beta', 'cv']].copy()
+
+# Labels (unchanged)
 df_y = df_data[['date', 'security', 'label']].copy()
 
-list_vars1 = ['price', 'return30', 'ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa']
+# Update list_vars1 to include the new columns
+list_vars1 = ['price', 'return30', 'ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa', 'sharpe_ratio', 'beta', 'cv']
+
 
 # we will perform walk forward validation for testing the buys - https://www.linkedin.com/pulse/walk-forward-validation-yeshwanth-n
 df_signals = pd.DataFrame(data={'date':df_x.loc[(df_x['date']>=start_test) & (df_x['date']<=end_test), 'date'].values})
@@ -86,7 +123,7 @@ for i in range(len(df_signals)):
             colsample_bytree=0.8,# Subsample ratio of columns when constructing each tree
             objective='binary:logistic',  # Objective function
             eval_metric='logloss',        # Evaluation metric
-            random_state=0
+            random_state=42
         )
         model2 = RandomForestClassifier(
             n_estimators=10,
@@ -134,7 +171,8 @@ for i in range(len(df_signals)):
             ('logreg', model4),
             ('catboost', model5)],
             voting='soft',  # Use 'soft' for probability-based voting
-            weights=[6,4,0,0,0]
+            weights=[1,1,1,1,1]
+
         )
         voting_clf.fit(np.array(df_trainx[list_vars1]), df_trainy['label'].values)
 
@@ -217,4 +255,3 @@ df_payoff = plot_payoff(df_buys)
 
 print('---> Python Script End', t1 := datetime.datetime.now())
 print('---> Total time taken', t1 - t0)
-
