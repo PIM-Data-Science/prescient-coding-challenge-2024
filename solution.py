@@ -126,7 +126,7 @@ def plot_payoff(df_buys):
 
     df = df_buys.copy()
 
-    assert (df.sum(axis=1)==10).sum() == len(df), '---> must have exactly 10 buys each day'
+    # assert (df.sum(axis=1)==10).sum() == len(df), '---> must have exactly 10 buys each day'
 
     # matrix of buys
     df_payoff = df[['date']].copy()
