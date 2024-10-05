@@ -171,7 +171,7 @@ for i in range(len(df_signals)):
             ('logreg', model4),
             ('catboost', model5)],
             voting='soft',  # Use 'soft' for probability-based voting
-            weights=[1,1,1,1,1]
+            weights=[6,4,0,0,0]
 
         )
         voting_clf.fit(np.array(df_trainx[list_vars1]), df_trainy['label'].values)
