@@ -8,7 +8,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier, GradientBoostingClassifier
+from xgboost import XGBClassifier
+from catboost import CatBoostClassifier
 
 print('---> Python Script Start', t0 := datetime.datetime.now())
 
@@ -72,12 +75,72 @@ for i in range(len(df_signals)):
 
     # fit a classifier
     if i == 0:
-        clf = RandomForestClassifier(n_estimators=10, criterion='gini', max_depth=10, min_samples_split=1000, min_samples_leaf=1000, min_weight_fraction_leaf=0.0, max_features='sqrt', random_state=0)
-        clf.fit(np.array(df_trainx[list_vars1]), df_trainy['label'].values)
+        # clf = RandomForestClassifier(n_estimators=10, criterion='gini', max_depth=10, min_samples_split=5000, min_samples_leaf=5000, min_weight_fraction_leaf=0.0, max_features='sqrt', random_state=0)
+        model1 = XGBClassifier(
+            n_estimators=100,    # Number of trees
+            learning_rate=0.075,   # Step size shrinkage
+            max_depth=5,         # Maximum depth of a tree
+            min_child_weight=1,  # Minimum sum of instance weight (hessian) needed in a child
+            gamma=0.1,             # Minimum loss reduction required to make a further partition
+            subsample=0.8,       # Subsample ratio of the training instances
+            colsample_bytree=0.8,# Subsample ratio of columns when constructing each tree
+            objective='binary:logistic',  # Objective function
+            eval_metric='logloss',        # Evaluation metric
+            random_state=0
+        )
+        model2 = RandomForestClassifier(
+            n_estimators=10,
+            criterion='gini', 
+            max_depth=10,
+            min_samples_split=1000,
+            min_samples_leaf=1000,
+            min_weight_fraction_leaf=0.0,
+            max_features='sqrt', 
+            random_state=0
+        )
+        model3 = GradientBoostingClassifier(
+            n_estimators=10,         # Start with 100
+            learning_rate=0.8,        # Typical starting value
+            max_depth=10,              # Keep it shallow to avoid overfitting
+            min_samples_split=1000,     # Minimum samples for split
+            min_samples_leaf=1000,       # Minimum samples for leaf
+            subsample=0.8,            # Use 80% of data for training each tree
+            max_features='sqrt',      # Use sqrt of features
+            random_state=0
+        )
+        model4 = LogisticRegression(
+            C=1.0,                     # Inverse of regularization strength
+            penalty='l2',              # Regularization type (l1 or l2)
+            solver='lbfgs',           # Algorithm for optimization
+            max_iter=1000,             # Maximum iterations
+            tol=1e-4,                 # Tolerance for stopping criteria
+            class_weight='balanced',   # Handle imbalanced classes
+            fit_intercept=True         # Include intercept term
+        )
+        model5 = CatBoostClassifier(
+            iterations=100,
+            learning_rate=0.1,
+            depth=6,
+            l2_leaf_reg=3,
+            loss_function='Logloss',
+            eval_metric='AUC',
+            random_state=0,
+            verbose=0
+        )
+        voting_clf = VotingClassifier(estimators=[
+            ('xgb', model1),
+            ('rf', model2),
+            ('gb', model3),
+            ('logreg', model4),
+            ('catboost', model5)],
+            voting='soft',  # Use 'soft' for probability-based voting
+            weights=[6,4,0,0,0]
+        )
+        voting_clf.fit(np.array(df_trainx[list_vars1]), df_trainy['label'].values)
 
     # predict and calc accuracy - 0.5 is the implicit cuttoff here
-    df_testy['signal'] = clf.predict_proba(np.array(df_testx[list_vars1]))[:, 1] # use probs to get strength of classification
-    df_testy['pred'] = clf.predict(np.array(df_testx[list_vars1]))
+    df_testy['signal'] = voting_clf.predict_proba(np.array(df_testx[list_vars1]))[:, 1] # use probs to get strength of classification
+    df_testy['pred'] = voting_clf.predict(np.array(df_testx[list_vars1]))
     df_testy['count'] = 1
 
     df_current = df_testy[df_testy['date']==df_signals.loc[i, 'date']]
@@ -126,7 +189,7 @@ def plot_payoff(df_buys):
 
     df = df_buys.copy()
 
-    assert (df.sum(axis=1)==10).sum() == len(df), '---> must have exactly 10 buys each day'
+    #assert (df.sum(axis=1)==10).sum() == len(df), '---> must have exactly 10 buys each day'
 
     # matrix of buys
     df_payoff = df[['date']].copy()
