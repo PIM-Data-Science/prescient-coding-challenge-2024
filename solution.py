@@ -1,157 +1,242 @@
 # %%
-
-import numpy as np
 import pandas as pd
-import datetime
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
 
-import plotly.express as px
-import plotly.graph_objects as go
+# %%
+data0 = 'prescient-coding-challenge-2024/data/data0.csv'
+data1 = 'prescient-coding-challenge-2024/data/data1.csv'
+returns = 'prescient-coding-challenge-2024/data/returns.csv'
 
+import pathlib
+
+# check if file exists
+for file in [data0, data1, returns]:
+    if not pathlib.Path(file).exists():
+        print(f'File {file} does not exist')
+
+# %%
+# Merge the sector information from data0 into data1
+data0 = pd.read_csv(data0)
+data1 = pd.read_csv(data1)
+returns = pd.read_csv(returns)
+
+data_combined = pd.merge(data1, data0, on='security')
+
+# Merge the return data from returns.csv
+data_combined = pd.merge(data_combined, returns, on=['date', 'security'])
+
+# Check the combined data
+data_combined.head()
+
+# %%
+# Step 2: Data Cleaning and Preprocessing
+
+# Handling missing values
+# Fill missing values in numeric columns with median
+numeric_cols = ['price', 'ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa', 'return1']
+data_combined[numeric_cols] = data_combined[numeric_cols].fillna(data_combined[numeric_cols].median())
+
+# Drop rows where labels are missing, as they are crucial for our predictions
+data_combined = data_combined.dropna(subset=['label'])
+
+# Sort data by date to maintain time order for future models
+data_combined = data_combined.sort_values(by=['security', 'date'])
+
+# Normalize the financial ratios (scaling to 0-1 range)
 from sklearn.preprocessing import MinMaxScaler
+
+scaler = MinMaxScaler()
+
+# Apply scaling to financial ratio columns
+data_combined[['ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa']] = scaler.fit_transform(
+    data_combined[['ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa']]
+)
+
+# Check the cleaned and scaled data
+data_combined.head()
+
+
+# %%
+# Step 3: Feature Engineering
+
+# Moving averages (let's calculate 7-day and 30-day moving averages for price)
+data_combined['ma_7'] = data_combined.groupby('security')['price'].transform(lambda x: x.rolling(window=7, min_periods=1).mean())
+data_combined['ma_30'] = data_combined.groupby('security')['price'].transform(lambda x: x.rolling(window=30, min_periods=1).mean())
+
+# Price momentum (percentage change in price over 1, 7, and 30 days)
+data_combined['pct_change_1d'] = data_combined.groupby('security')['price'].transform(lambda x: x.pct_change(periods=1))
+data_combined['pct_change_7d'] = data_combined.groupby('security')['price'].transform(lambda x: x.pct_change(periods=7))
+data_combined['pct_change_30d'] = data_combined.groupby('security')['price'].transform(lambda x: x.pct_change(periods=30))
+
+# Handling missing values after rolling operations by filling them with 0
+data_combined[['pct_change_1d', 'pct_change_7d', 'pct_change_30d']] = data_combined[['pct_change_1d', 'pct_change_7d', 'pct_change_30d']].fillna(0)
+
+# Encoding sector using one-hot encoding
+data_combined = pd.get_dummies(data_combined, columns=['sector'])
+
+# Check the final dataset after feature engineering
+data_combined.head()
+
+
+# %%
+# Step 4: Model Training
+
+from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, accuracy_score
 
-print('---> Python Script Start', t0 := datetime.datetime.now())
+# Define the features and target variable
+features = [
+    'price', 'ma_7', 'ma_30', 'pct_change_1d', 'pct_change_7d', 'pct_change_30d', 
+    'ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa'
+] + [col for col in data_combined.columns if 'sector_' in col]  # Include sector features
 
-# %%
+X = data_combined[features]
+y = data_combined['label']
 
-print('---> the parameters')
+# Split the data into training and testing sets (80% train, 20% test)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-# training and test dates
-start_train = datetime.date(2017, 1, 1)
-end_train = datetime.date(2023, 11, 30) # gap for embargo (no overlap between train and test)
-start_test = datetime.date(2024, 1, 1) # test set is this datasets 2024 data
-end_test = datetime.date(2024, 6, 30)
+# Initialize and train the RandomForest classifier
+model = RandomForestClassifier(n_estimators=100, random_state=42)
+model.fit(X_train, y_train)
 
-n_buys = 10
-verbose = False
+# Make predictions on the test set
+y_pred = model.predict(X_test)
 
-print('---> initial data set up')
+# Evaluate the model performance
+print("Accuracy:", accuracy_score(y_test, y_pred))
+print("Classification Report:\n", classification_report(y_test, y_pred))
 
-# sector data
-df_sectors = pd.read_csv('data/data0.csv')
-
-# price and fin data
-df_data = pd.read_csv('data/data1.csv')
-df_data['date'] = pd.to_datetime(df_data['date']).apply(lambda d: d.date())
-
-df_x = df_data[['date', 'security', 'price', 'return30', 'ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa']].copy()
-df_y = df_data[['date', 'security', 'label']].copy()
-
-list_vars1 = ['price', 'return30', 'ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa']
-
-# we will perform walk forward validation for testing the buys - https://www.linkedin.com/pulse/walk-forward-validation-yeshwanth-n
-df_signals = pd.DataFrame(data={'date':df_x.loc[(df_x['date']>=start_test) & (df_x['date']<=end_test), 'date'].values})
-df_signals.drop_duplicates(inplace=True)
-df_signals.reset_index(drop=True, inplace=True)
-df_signals.sort_values(by='date', inplace=True) # this code just gets the dates that we need to generate buy signals for
 
 # %%
+# Step 4: Model Training
 
-for i in range(len(df_signals)):
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.metrics import classification_report, accuracy_score
 
-    if verbose: print('---> doing', df_signals.loc[i, 'date'])
+# Define the features and target variable
+features = [
+    'price', 'ma_7', 'ma_30', 'pct_change_1d', 'pct_change_7d', 'pct_change_30d', 
+    'ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa'
+] + [col for col in data_combined.columns if 'sector_' in col]  # Include sector features
 
-    # this iteretaions training set
-    df_trainx = df_x[df_x['date']<df_signals.loc[i, 'date']].copy()
-    df_trainx.drop(labels=df_trainx[df_trainx['date']==df_trainx['date'].max()].index, inplace=True) # no overlap with test set
+X = data_combined[features]
+y = data_combined['label']
 
-    df_trainy = df_y[df_y['date']<df_signals.loc[i, 'date']].copy()
-    df_trainy.drop(labels=df_trainy[df_trainy['date']==df_trainy['date'].max()].index, inplace=True) # no overlap with test set
+# Split the data into training and testing sets (80% train, 20% test)
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
 
-    # this iteretaions test set
-    df_testx = df_x[df_x['date']>=df_signals.loc[i, 'date']].copy()
-    df_testy = df_y[df_y['date']>=df_signals.loc[i, 'date']].copy()
+# Initialize and train the RandomForest classifier
+model = RandomForestClassifier(n_estimators=100, random_state=42)
+model.fit(X_train, y_train)
 
-    # scale, and store scaling objects for test set
-    dict_scaler = {}
-    for col in list_vars1:
+# Make predictions on the test set
+y_pred = model.predict(X_test)
 
-        dict_scaler[col] = MinMaxScaler(feature_range=(-1,1))
-        df_trainx[col] = dict_scaler[col].fit_transform(np.array(df_trainx[col]).reshape((len(df_trainx[col]),1)))[:, 0]
-        df_testx[col] = dict_scaler[col].transform(np.array(df_testx[col]).reshape((len(df_testx[col]),1)))[:, 0]
+# Evaluate the model performance
+print("Accuracy:", accuracy_score(y_test, y_pred))
+print("Classification Report:\n", classification_report(y_test, y_pred))
 
-    # fit a classifier
-    if i == 0:
-        clf = RandomForestClassifier(n_estimators=10, criterion='gini', max_depth=10, min_samples_split=1000, min_samples_leaf=1000, min_weight_fraction_leaf=0.0, max_features='sqrt', random_state=0)
-        clf.fit(np.array(df_trainx[list_vars1]), df_trainy['label'].values)
 
-    # predict and calc accuracy - 0.5 is the implicit cuttoff here
-    df_testy['signal'] = clf.predict_proba(np.array(df_testx[list_vars1]))[:, 1] # use probs to get strength of classification
-    df_testy['pred'] = clf.predict(np.array(df_testx[list_vars1]))
-    df_testy['count'] = 1
+# %%
+# Step 5: Portfolio Construction
 
-    df_current = df_testy[df_testy['date']==df_signals.loc[i, 'date']]
+# Get the predicted probabilities for each stock on the test set
+y_pred_probs = model.predict_proba(X_test)[:, 1]  # Probabilities for class 1 (positive performance)
 
-    acc_total = (df_testy['label'] == df_testy['pred']).sum()/len(df_testy)
-    acc_current = (df_current['label'] == df_current['pred']).sum()/len(df_current)
+# Add the predicted probabilities to the test data
+test_data = data_combined.iloc[X_test.index]
+test_data['predicted_prob'] = y_pred_probs
+
+# Initialize a DataFrame to store the portfolio for each day
+portfolio = pd.DataFrame()
+
+# For each day in the test set, select the top 10 stocks based on predicted probabilities
+for date in test_data['date'].unique():
+    daily_data = test_data[test_data['date'] == date]
+    top_10_stocks = daily_data.nlargest(10, 'predicted_prob')  # Select top 10 stocks
     
-    print('---> accuracy test set', round(acc_total, 2), ', accuracy current date', round(acc_current, 2))
+    # Store the selected stocks and their details
+    portfolio = pd.concat([portfolio, top_10_stocks])
 
-    # add accuracy and signal to dataframe
-    df_signals.loc[i, 'acc_total'] = acc_total
-    df_signals.loc[i, 'acc_current'] = acc_current
+# Evaluate the portfolio performance using Total Return Index (TRI)
+portfolio['daily_return'] = portfolio['return1']
 
-    df_signals.loc[i, df_current['security'].values] = df_current['signal'].values
+# Calculate cumulative return
+portfolio['cumulative_return'] = (1 + portfolio['daily_return']).cumprod()
 
-# %%
+# Calculate TRI (Total Return Index) for the portfolio
+portfolio['TRI'] = portfolio.groupby('date')['cumulative_return'].transform('last')
 
-# create buy matrix for payoff plot
-df_signals['10th'] = df_signals[df_sectors['security'].values].apply(lambda x: sorted(x)[len(df_sectors)-n_buys-1], axis=1)
+# Display portfolio performance
+portfolio[['date', 'security', 'daily_return', 'cumulative_return', 'TRI']].head()
 
-df_index = pd.DataFrame(np.array(df_signals[df_sectors['security'].values]) > np.array(df_signals['10th']).reshape((len(df_signals),1)))
-
-# set 1 for top 10 strongest signals
-df_buys = pd.DataFrame()
-df_buys[df_sectors['security'].values] = np.zeros((len(df_signals), len(df_sectors)))
-df_buys[df_index.values] = 1
-df_buys.insert(0, 'date', df_signals['date'].copy())
-df_buys
-
-# check some signal plots
-fig_aapl = px.line(df_signals, x='date', y='AAPL')
-fig_aapl.show()
-
-fig_pixel = px.imshow(np.array(df_buys[df_sectors['security'].values]))
-fig_pixel.show()
 
 # %%
+# Step 2: Create a buy matrix with 1s and 0s, ensuring each row sums to 10
 
-# create return matrix
-df_returns = pd.read_csv('data/returns.csv')
-df_returns['date']= pd.to_datetime(df_returns['date']).apply(lambda d: d.date())
-df_returns = df_returns[df_returns['date']>=start_test]
-df_returns = df_returns.pivot(index='date', columns='security', values='return1')
+# Create a pivot table for the buy matrix
+buy_matrix = pd.pivot_table(
+    data=portfolio,
+    values='predicted_prob',
+    index='date',
+    columns='security',
+    fill_value=0
+)
 
-def plot_payoff(df_buys):
+# Replace probabilities with 1s for the top 10 stocks and 0s for the rest
+def top_10_buy(row):
+    # Get the indices of the 10 largest values
+    top_10_indices = row.nlargest(10).index
+    # Create a new row where only the top 10 are marked as 1
+    new_row = pd.Series(0, index=row.index)
+    new_row[top_10_indices] = 1
+    return new_row
 
-    df = df_buys.copy()
+# Apply the top_10_buy function to each row
+buy_matrix = buy_matrix.apply(top_10_buy, axis=1)
 
-    assert (df.sum(axis=1)==10).sum() == len(df), '---> must have exactly 10 buys each day'
+# Ensure each row sums to exactly 10
+assert all(buy_matrix.sum(axis=1) == 10), "Each row should sum to exactly 10 buys."
 
-    # matrix of buys
-    df_payoff = df[['date']].copy()
-    del df['date']
-    arr_buys = np.array(df)
-    arr_buys = arr_buys*(1/n_buys) # equally weighted
+# Display the buy matrix (1s for buys, 0s for don't buy)
+buy_matrix.head()
 
-    # return matrix
-    arr_ret = np.array(df_returns)
-    arr_ret = arr_ret + 1
-
-    df_payoff['payoff'] = (arr_buys * arr_ret @ np.ones(len(df_sectors)).reshape((len(df_sectors), 1)))[:, 0]
-    df_payoff['tri'] = df_payoff['payoff'].cumprod()
-
-    fig_payoff = px.line(df_payoff, x='date', y='tri')
-    fig_payoff.show()
-
-    print(f"---> payoff for these buys between period {df_payoff['date'].min()} and {df_payoff['date'].max()} is {(df_payoff['tri'].values[-1]-1)*100 :.2f}%")
-
-    return df_payoff
-
-df_payoff = plot_payoff(df_buys)
 
 # %%
+import matplotlib.pyplot as plt
 
-print('---> Python Script End', t1 := datetime.datetime.now())
-print('---> Total time taken', t1 - t0)
+# Step 3: Generate the payoff chart (cumulative return over time)
+
+# Plot cumulative return for the entire portfolio over time
+plt.figure(figsize=(10, 6))
+plt.plot(portfolio['date'], portfolio['cumulative_return'], label='Cumulative Return', color='blue')
+plt.title('Portfolio Cumulative Return Over Time')
+plt.xlabel('Date')
+plt.ylabel('Cumulative Return')
+plt.legend()
+plt.grid(True)
+plt.xticks(rotation=45)
+plt.show()
+
+# Optionally, you can also plot the TRI if desired
+plt.figure(figsize=(10, 6))
+plt.plot(portfolio['date'], portfolio['TRI'], label='Total Return Index (TRI)', color='green')
+plt.title('Portfolio Total Return Index Over Time')
+plt.xlabel('Date')
+plt.ylabel('TRI')
+plt.legend()
+plt.grid(True)
+plt.xticks(rotation=45)
+plt.show()
+
+
+# %% [markdown]
+# 
+
 
