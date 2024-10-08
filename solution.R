@@ -69,6 +69,7 @@ for (i in seq_len(nrow(df_signals))) {
     clf <- randomForest(x = df_trainx[list_vars1], y = df_trainy$label, ntree = 10, mtry = sqrt(length(list_vars1)), nodesize = 1000)
   }
   
+  
   # Predictions and accuracy
   pred_probs <- predict(clf, newdata = df_testx[list_vars1], type = "prob")
   df_testy$signal <- pred_probs[, 2]
@@ -157,4 +158,71 @@ df_payoff <- plot_payoff(df_buys)
 ggplot(df_payoff, aes(x = date, y = tri)) + geom_line() + ggtitle("Payoff Over Time")
 
 
-print('---> R Script End')
+# Install and load necessary libraries
+library(h2o)
+
+# 1. Initialize the H2O cluster
+h2o.init()
+
+# 2. Prepare the time series data
+# Assume 'df_data' is your time series data with 'date' and 'price' columns (or whatever variable you're predicting)
+# Example: df_data <- data.frame(date = as.Date('2017-01-01') + 0:1000, price = rnorm(1001, 100, 5))
+
+# Convert date to numerical format for modeling
+df_data$time_index <- as.numeric(as.Date(df_data$date))
+
+# Split the data into training and test sets
+train_data <- df_data %>% filter(date <= as.Date('2023-11-30'))
+test_data <- df_data %>% filter(date >= as.Date('2024-01-01'))
+
+# Convert training and testing data to H2O format
+train_h2o <- as.h2o(train_data)
+test_h2o <- as.h2o(test_data)
+
+# Define the target variable (e.g., 'price') and feature(s) (e.g., 'time_index')
+response <- "price"  # The target variable you want to forecast
+predictors <- "time_index"  # The feature to use for modeling
+
+# 3. Run H2O AutoML to train models
+aml <- h2o.automl(
+  x = predictors,                  # Feature(s)
+  y = response,                    # Target variable
+  training_frame = train_h2o,      # Training data
+  max_runtime_secs = 120,          # Time limit for training (adjust as needed)
+  seed = 42,                       # Ensure reproducibility
+  project_name = "time_series_automl"
+)
+
+# 4. View the leaderboard of models trained
+lb <- aml@leaderboard
+print(lb)
+
+# 5. Get the best model from the AutoML leaderboard
+best_model <- h2o.get_best_model(aml)
+
+# Summary of the best model
+print(best_model)
+
+# 6. Make predictions on the test set (future dates)
+predictions <- h2o.predict(best_model, test_h2o)
+
+# Convert predictions to R data frame
+predictions_df <- as.data.frame(predictions)
+
+# 7. Combine predictions with the actual test data for visualization
+result <- cbind(test_data, predictions_df)
+names(result)[ncol(result)] <- "predicted_price"
+
+# 8. Plot the actual vs predicted prices
+library(ggplot2)
+
+ggplot(result, aes(x = date)) +
+  geom_line(aes(y = price, color = "Actual")) +
+  geom_line(aes(y = predicted_price, color = "Predicted")) +
+  labs(title = "Actual vs Predicted Stock Prices",
+       x = "Date", y = "Price") +
+  theme_minimal()
+
+# 9. Shut down the H2O cluster (optional)
+h2o.shutdown(prompt = FALSE)
+
