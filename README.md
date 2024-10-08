@@ -1,6 +1,35 @@
 ![img](img/header.png)
 
-# Welcome!
+# Update 2024-10-08
+
+We are busy grading the submissions. A few comments after having a look at some of the submissions.
+
+1. The 1st grading guide is strictly adhered to.
+2. Data leakage seems to be common in the submissions.
+
+Here's a ChatGPT explanation of data leakage
+
+Data leakage in machine learning refers to a situation where information from outside the training dataset is used to create the model, leading to overly optimistic performance estimates. This can result in models that perform well during testing but fail in real-world applications because they rely on data that wouldn’t be available during actual predictions.
+
+Here are a few common examples of data leakage:
+
+1. **Target Leakage**. This occurs when the training dataset includes features that directly or indirectly contain information about the target variable. For instance, if you're predicting whether a patient has a disease and you include a feature that measures a related treatment received after the diagnosis, the model might learn from this post-diagnosis information, leading to misleading accuracy during validation.
+
+2. **Train-Test Contamination**. If the test set is influenced by the training set, this is another form of leakage. For example, if you normalize your data using the mean and standard deviation of the entire dataset (including both training and test data), the model may inadvertently have access to test data characteristics during training. Instead, you should compute normalization parameters using only the training data.
+
+3. **Temporal Leakage**. In time-series forecasting, using future data to predict past events can lead to leakage. For example, if you build a model to predict stock prices using data that includes future prices, the model will appear to perform well, but it wouldn’t be viable in a real-world scenario where future data isn’t available.
+
+4. **Feature Engineering Leakage**. If you create features that use information from the target variable or future information, this can introduce leakage. For example, if you’re predicting customer churn and create a feature that sums up customer interactions from the future, it could skew the results.
+Prevention Strategies
+
+To prevent data leakage, you can take the following steps:
+
+- **Careful Feature Selection**: Ensure that features are derived only from the training data and don’t contain information about the target variable.
+- **Proper Data Splitting**: Always split your data into training and test sets before any preprocessing to avoid contamination.
+- **Cross-Validation**: Use techniques like k-fold cross-validation, ensuring that the splits respect the temporal order in time-series data.
+- **Monitoring**: Regularly evaluate the model performance using separate validation datasets that are representative of real-world conditions.
+
+## Welcome!
 
 Welcome to the Prescient Coding Challenge 2024!
 
