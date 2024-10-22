@@ -1,160 +1,117 @@
-# Load necessary libraries
+set.seed(123)
+
 library(dplyr)
-library(lubridate)
 library(ggplot2)
-library(randomForest)
 library(tidyr)
-library(pacman)
-# pacman::p_load(randomForest)
+library(caret)  # For confusionMatrix
 
-print('---> R Script Start')
+params <- list(
+  train_start_date = as.Date("2017-01-01"),
+  train_end_date = as.Date("2023-12-31"),
+  test_start_date = as.Date("2024-01-01"),
+  test_end_date = as.Date("2024-12-31"),
+  max_buys = 10,
+  verbose = FALSE
+)
 
-# Define parameters
-start_train <- as.Date("2017-01-01")
-end_train <- as.Date("2023-11-30")
-start_test <- as.Date("2024-01-01")
-end_test <- as.Date("2024-06-30")
+sector_data <- read.csv('data0.csv')
+financial_data <- read.csv('data1.csv') %>%
+  mutate(date = as.Date(date))
 
-n_buys <- 10
-verbose <- FALSE
+returns_data <- read.csv('returns.csv') %>%
+  mutate(date = as.Date(date)) %>%
+  # only use data before 2024
+  filter(date >= params$test_start_date) %>%
+  pivot_wider(names_from = security, values_from = return1)
 
-print('---> initial data set up')
+features <- c('price', 'return30', 'ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa')
+features_data <- financial_data %>% select(date, security, all_of(features))
+labels_data <- financial_data %>% select(date, security, label)
 
-# Load sector data
-df_sectors <- read.csv('data/data0.csv')
+signal_dates <- financial_data %>%
+  filter(date >= params$test_start_date & date <= params$test_end_date) %>%
+  distinct(date) %>%
+  arrange(date) %>%
+  mutate(total_accuracy = NA, current_accuracy = NA)
 
-# Load price and financial data
-df_data <- read.csv('data/data1.csv')
-df_data$date <- as.Date(df_data$date)
-
-df_x <- df_data %>% select(date, security, price, return30, ratio_pe, ratio_pcf, ratio_de, ratio_roe, ratio_roa)
-df_y <- df_data %>% select(date, security, label)
-
-list_vars1 <- c('price', 'return30', 'ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa')
-
-# Create signals DataFrame
-df_signals <- data.frame(date = unique(df_x$date[df_x$date >= start_test & df_x$date <= end_test]))
-df_signals <- df_signals %>% arrange(date)
-
-# Initialize an empty list for storing accuracy results
-df_signals$acc_total <- NA
-df_signals$acc_current <- NA
-
-for (i in seq_len(nrow(df_signals))) {
-  
-  if (verbose) print(paste('---> doing', df_signals$date[i]))
-  
-  # Training set
-  df_trainx <- df_x %>% filter(date < df_signals$date[i])
-  df_trainx <- df_trainx %>% filter(date != max(date))
-  
-  df_trainy <- df_y %>% filter(date < df_signals$date[i])
-  df_trainy <- df_trainy %>% filter(date != max(date))
-  
-  # Test set
-  df_testx <- df_x %>% filter(date >= df_signals$date[i])
-  df_testy <- df_y %>% filter(date >= df_signals$date[i])
-  
-  # Scale data
-  for (col in list_vars1) {
-    scaler <- function(x) (x - min(x)) / (max(x) - min(x)) * 2 - 1
-    df_trainx[[col]] <- scaler(df_trainx[[col]])
-    df_testx[[col]] <- scaler(df_testx[[col]])
-  }
-  
-  df_trainy <- df_trainy %>% mutate(label = as.factor(label)) 
-  
-  # Fit the Random Forest classifier
-  if (i == 1) {
-    clf <- randomForest(x = df_trainx[list_vars1], y = df_trainy$label, ntree = 10, mtry = sqrt(length(list_vars1)), nodesize = 1000)
-  }
-  
-  # Predictions and accuracy
-  pred_probs <- predict(clf, newdata = df_testx[list_vars1], type = "prob")
-  df_testy$signal <- pred_probs[, 2]
-  df_testy$pred <- ifelse(pred_probs[, 2] > 0.5, 1, 0)
-  df_testy$count <- 1
-  
-  df_current <- df_testy %>% filter(date == df_signals$date[i])
-  
-  acc_total <- mean(df_testy$label == df_testy$pred)
-  acc_current <- mean(df_current$label == df_current$pred)
-  
-  print(paste('---> accuracy test set', round(acc_total, 2), ', accuracy current date', round(acc_current, 2)))
-  
-  # Add accuracy and signal to dataframe
-  df_signals$acc_total[i] <- acc_total
-  df_signals$acc_current[i] <- acc_current
-  
-  df_signals[i, df_current$security] <- df_current$signal
+normalize_features <- function(df) {
+  df %>%
+    mutate(across(all_of(features), ~ (.-min(.))/(max(.)-min(.)) * 2 - 1))
 }
 
-# Create buy matrix for payoff plot
-df_signals$`10th` <- apply(df_signals[df_sectors$security], 1, function(x) sort(x, decreasing = TRUE)[n_buys])
-df_index <- df_signals[df_sectors$security] >= df_signals$`10th`
+for (index in seq_len(nrow(signal_dates))) {
+  
+  training_filter <- features_data$date < signal_dates$date[index]
+  
+  training_features <- features_data %>%
+    filter(training_filter) %>%
+    filter(date != max(date)) %>%
+    normalize_features()
+  
+  training_labels <- labels_data %>%
+    filter(training_filter) %>%
+    filter(date != max(date)) %>%
+    mutate(label = as.factor(label))
+  
+  testing_features <- features_data %>%
+    filter(date >= signal_dates$date[index]) %>%
+    normalize_features()
+  
+  testing_labels <- labels_data %>%
+    filter(date >= signal_dates$date[index])
+  
+  # logistic model
+  if (index == 1) {
+    model <- glm(label ~ ., data = training_features %>% mutate(label = training_labels$label), family = binomial)
+  }
+  
+  predicted_probabilities <- predict(model, newdata = testing_features, type = "response")
+  testing_labels <- testing_labels %>%
+    mutate(signal_strength = predicted_probabilities,
+           predicted_label = ifelse(predicted_probabilities > 0.5, 1, 0))
+  
+  current_day_labels <- testing_labels %>% filter(date == signal_dates$date[index])
+  
+  signal_dates$total_accuracy[index] <- mean(testing_labels$label == testing_labels$predicted_label)
+  signal_dates$current_accuracy[index] <- mean(current_day_labels$label == current_day_labels$predicted_label)
+  
+  
+  signal_dates[index, current_day_labels$security] <- current_day_labels$signal_strength
+}
 
-# Set 1 for top 10 strongest signals
-df_buys <- as.data.frame(matrix(0, nrow = nrow(df_signals), ncol = length(df_sectors$security)))
-colnames(df_buys) <- df_sectors$security
-df_buys[df_index] <- 1
+buy_thresholds <- apply(signal_dates[sector_data$security], 1, function(x) sort(x, decreasing = TRUE)[params$max_buys])
+buy_indices <- signal_dates[sector_data$security] >= buy_thresholds
 
-# keep first 10 obs
-process_row <- function(row) {
-  ones_indices <- which(row == 1)  # Get the indices of 1's
-  if(length(ones_indices) > 10) {
-    row[ones_indices[11:length(ones_indices)]] <- 0  # Set ones after the first 10 to 0
+buy_matrix <- as.data.frame(ifelse(buy_indices, 1, 0), stringsAsFactors = FALSE)
+colnames(buy_matrix) <- sector_data$security
+
+buy_matrix <- t(apply(buy_matrix, 1, function(row) {
+  if (sum(row) > params$max_buys) {
+    row[order(row, decreasing = TRUE)[(params$max_buys + 1):length(row)]] <- 0
   }
   return(row)
-}
-df_buys <- t(apply(df_buys, 1, process_row))
+}))
 
-# add dates
-library(zoo)
-# df_buys <- cbind(date = as.Date(df_signals$date), df_buys)
-df_buys <- cbind(date = df_signals$date, df_buys)
+buy_matrix <- cbind(date = signal_dates$date, buy_matrix)
 
-
-# df_buys[,-1] %>% rowSums()
-
-
-# Plot signals
-ggplot(df_signals, aes(x = date)) + geom_line(aes(y = AAPL)) + ggtitle("AAPL Signals")
-image(t(df_buys[-1]))  # You might need to use other visualization for the buy signals
-
-# Create return matrix
-df_returns <- read.csv('data/returns.csv')
-df_returns$date <- as.Date(df_returns$date)
-df_returns <- df_returns %>% filter(date >= start_test)
-df_returns <- df_returns %>% pivot_wider(names_from = security, values_from = return1)
-
-plot_payoff <- function(df_buys) {
+calculate_payoff <- function(buy_matrix, returns_data) {
+  normalized_buys <- buy_matrix[,-1] * (1 / params$max_buys)
+  returns_array <- as.matrix(returns_data[-1] + 1)
   
-  df <- df_buys[,-1]
+  total_payoff <- diag(normalized_buys %*% t(returns_array - 1))
+  cumulative_growth <- cumprod(1 + total_payoff)
   
-  if (sum(rowSums(df) == 10) != nrow(df)) {
-    stop("---> must have exactly 10 buys each day")
-  }
+  payoffs <- tibble(date = returns_data$date, total_payoff = total_payoff, cumulative_growth = cumulative_growth)
   
-  # df_payoff <- df[, 1, drop = FALSE]
-  df <- df * (1 / n_buys)  # equally weighted
-
-  df_payoff <- NULL
-  arr_ret <- as.matrix(df_returns[-1] + 1)
-  df_payoff$payoff <- diag(df %*% t(arr_ret-1))
-  df_payoff$tri <- cumprod(1+df_payoff$payoff)
+  final_payoff_percentage <- (tail(payoffs$cumulative_growth, 1) - 1) * 100
   
-  df_payoff$date <- df_returns$date
-  df_payoff <- df_payoff %>% as_tibble()
-  
-  
-  payoff_result <- (tail(df_payoff$tri, 1) - 1) * 100
-  print(paste("---> payoff for these buys between period", min(df_payoff$date), "and", max(df_payoff$date), "is", round(payoff_result, 2), "%"))
-  
-  return(df_payoff)
+  return(payoffs)
 }
 
-df_payoff <- plot_payoff(df_buys)
-ggplot(df_payoff, aes(x = date, y = tri)) + geom_line() + ggtitle("Payoff Over Time")
+payoff_results <- calculate_payoff(buy_matrix, returns_data)
 
-
-print('---> R Script End')
+ggplot(payoff_results, aes(x = date, y = cumulative_growth)) +
+  geom_line() +
+  ggtitle("Predicted Payoff Over 6 Months") +
+  xlab("Date") +
+  ylab("Predicted Payoff")
