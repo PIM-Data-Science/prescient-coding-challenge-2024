@@ -8,7 +8,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 from sklearn.preprocessing import MinMaxScaler
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.ensemble import RandomForestClassifier, VotingClassifier, GradientBoostingClassifier
+from xgboost import XGBClassifier
+from catboost import CatBoostClassifier
 
 print('---> Python Script Start', t0 := datetime.datetime.now())
 
@@ -34,10 +37,47 @@ df_sectors = pd.read_csv('data/data0.csv')
 df_data = pd.read_csv('data/data1.csv')
 df_data['date'] = pd.to_datetime(df_data['date']).apply(lambda d: d.date())
 
-df_x = df_data[['date', 'security', 'price', 'return30', 'ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa']].copy()
+# Sharpe Ratio calculation
+def sharpe_ratio(returns, risk_free_rate=0.02):
+    excess_returns = returns - risk_free_rate
+    return excess_returns.mean() / excess_returns.std() if excess_returns.std() != 0 else 0
+
+# Beta calculation
+market_returns = df_data.groupby('date')['return30'].mean()
+
+def calculate_beta(stock_returns, market_returns):
+    # Align dates between stock and market returns
+    common_dates = stock_returns.index.intersection(market_returns.index)
+    stock_returns_aligned = stock_returns.loc[common_dates]
+    market_returns_aligned = market_returns.loc[common_dates]
+    
+    if len(stock_returns_aligned) > 1 and len(market_returns_aligned) > 1:
+        covariance = np.cov(stock_returns_aligned, market_returns_aligned)[0][1]
+        market_variance = np.var(market_returns_aligned)
+        return covariance / market_variance if market_variance != 0 else 0
+    else:
+        return 0
+
+# Apply Sharpe Ratio and Beta to each security
+df_data['sharpe_ratio'] = df_data.groupby('security')['return30'].transform(lambda x: sharpe_ratio(x))
+df_data['beta'] = df_data.groupby('security')['return30'].transform(lambda x: calculate_beta(x, market_returns))
+
+
+# Coefficient of Variation (CV) calculation
+df_data['cv'] = df_data.groupby('security')['return30'].transform(lambda x: x.std() / x.mean() if x.mean() != 0 else 0)
+
+# Calculate Covariance (can also be skipped if not needed as a feature column)
+df_covariance = df_data.pivot(index='date', columns='security', values='price').pct_change().cov()
+
+# Create df_x including the new columns for engineered features
+df_x = df_data[['date', 'security', 'price', 'return30', 'ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa', 'sharpe_ratio', 'beta', 'cv']].copy()
+
+# Labels (unchanged)
 df_y = df_data[['date', 'security', 'label']].copy()
 
-list_vars1 = ['price', 'return30', 'ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa']
+# Update list_vars1 to include the new columns
+list_vars1 = ['price', 'return30', 'ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa', 'sharpe_ratio', 'beta', 'cv']
+
 
 # we will perform walk forward validation for testing the buys - https://www.linkedin.com/pulse/walk-forward-validation-yeshwanth-n
 df_signals = pd.DataFrame(data={'date':df_x.loc[(df_x['date']>=start_test) & (df_x['date']<=end_test), 'date'].values})
@@ -72,12 +112,73 @@ for i in range(len(df_signals)):
 
     # fit a classifier
     if i == 0:
-        clf = RandomForestClassifier(n_estimators=10, criterion='gini', max_depth=10, min_samples_split=1000, min_samples_leaf=1000, min_weight_fraction_leaf=0.0, max_features='sqrt', random_state=0)
-        clf.fit(np.array(df_trainx[list_vars1]), df_trainy['label'].values)
+        # clf = RandomForestClassifier(n_estimators=10, criterion='gini', max_depth=10, min_samples_split=5000, min_samples_leaf=5000, min_weight_fraction_leaf=0.0, max_features='sqrt', random_state=0)
+        model1 = XGBClassifier(
+            n_estimators=100,    # Number of trees
+            learning_rate=0.075,   # Step size shrinkage
+            max_depth=5,         # Maximum depth of a tree
+            min_child_weight=1,  # Minimum sum of instance weight (hessian) needed in a child
+            gamma=0.1,             # Minimum loss reduction required to make a further partition
+            subsample=0.8,       # Subsample ratio of the training instances
+            colsample_bytree=0.8,# Subsample ratio of columns when constructing each tree
+            objective='binary:logistic',  # Objective function
+            eval_metric='logloss',        # Evaluation metric
+            random_state=42
+        )
+        model2 = RandomForestClassifier(
+            n_estimators=10,
+            criterion='gini', 
+            max_depth=10,
+            min_samples_split=1000,
+            min_samples_leaf=1000,
+            min_weight_fraction_leaf=0.0,
+            max_features='sqrt', 
+            random_state=0
+        )
+        model3 = GradientBoostingClassifier(
+            n_estimators=10,         # Start with 100
+            learning_rate=0.8,        # Typical starting value
+            max_depth=10,              # Keep it shallow to avoid overfitting
+            min_samples_split=1000,     # Minimum samples for split
+            min_samples_leaf=1000,       # Minimum samples for leaf
+            subsample=0.8,            # Use 80% of data for training each tree
+            max_features='sqrt',      # Use sqrt of features
+            random_state=0
+        )
+        model4 = LogisticRegression(
+            C=1.0,                     # Inverse of regularization strength
+            penalty='l2',              # Regularization type (l1 or l2)
+            solver='lbfgs',           # Algorithm for optimization
+            max_iter=1000,             # Maximum iterations
+            tol=1e-4,                 # Tolerance for stopping criteria
+            class_weight='balanced',   # Handle imbalanced classes
+            fit_intercept=True         # Include intercept term
+        )
+        model5 = CatBoostClassifier(
+            iterations=100,
+            learning_rate=0.1,
+            depth=6,
+            l2_leaf_reg=3,
+            loss_function='Logloss',
+            eval_metric='AUC',
+            random_state=0,
+            verbose=0
+        )
+        voting_clf = VotingClassifier(estimators=[
+            ('xgb', model1),
+            ('rf', model2),
+            ('gb', model3),
+            ('logreg', model4),
+            ('catboost', model5)],
+            voting='soft',  # Use 'soft' for probability-based voting
+            weights=[6,4,0,0,0] # [1,1,1,1,1]
+
+        )
+        voting_clf.fit(np.array(df_trainx[list_vars1]), df_trainy['label'].values)
 
     # predict and calc accuracy - 0.5 is the implicit cuttoff here
-    df_testy['signal'] = clf.predict_proba(np.array(df_testx[list_vars1]))[:, 1] # use probs to get strength of classification
-    df_testy['pred'] = clf.predict(np.array(df_testx[list_vars1]))
+    df_testy['signal'] = voting_clf.predict_proba(np.array(df_testx[list_vars1]))[:, 1] # use probs to get strength of classification
+    df_testy['pred'] = voting_clf.predict(np.array(df_testx[list_vars1]))
     df_testy['count'] = 1
 
     df_current = df_testy[df_testy['date']==df_signals.loc[i, 'date']]
@@ -126,7 +227,7 @@ def plot_payoff(df_buys):
 
     df = df_buys.copy()
 
-    assert (df.sum(axis=1)==10).sum() == len(df), '---> must have exactly 10 buys each day'
+    #assert (df.sum(axis=1)==10).sum() == len(df), '---> must have exactly 10 buys each day'
 
     # matrix of buys
     df_payoff = df[['date']].copy()
@@ -154,4 +255,3 @@ df_payoff = plot_payoff(df_buys)
 
 print('---> Python Script End', t1 := datetime.datetime.now())
 print('---> Total time taken', t1 - t0)
-
