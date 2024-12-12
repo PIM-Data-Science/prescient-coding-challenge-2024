@@ -1,160 +1,217 @@
-# Load necessary libraries
-library(dplyr)
+# Load required libraries
+library(tidyverse)
 library(lubridate)
-library(ggplot2)
-library(randomForest)
-library(tidyr)
-library(pacman)
-# pacman::p_load(randomForest)
+library(plotly)
 
-print('---> R Script Start')
+print(paste("---> R Script Start", Sys.time()))
 
-# Define parameters
+# Set up parameters
 start_train <- as.Date("2017-01-01")
 end_train <- as.Date("2023-11-30")
 start_test <- as.Date("2024-01-01")
 end_test <- as.Date("2024-06-30")
 
 n_buys <- 10
-verbose <- FALSE
+lookback_period <- 20  # Number of days to look back for momentum calculation
 
-print('---> initial data set up')
-
-# Load sector data
+# Load data
 df_sectors <- read.csv('data/data0.csv')
-
-# Load price and financial data
 df_data <- read.csv('data/data1.csv')
 df_data$date <- as.Date(df_data$date)
 
-df_x <- df_data %>% select(date, security, price, return30, ratio_pe, ratio_pcf, ratio_de, ratio_roe, ratio_roa)
-df_y <- df_data %>% select(date, security, label)
-
-list_vars1 <- c('price', 'return30', 'ratio_pe', 'ratio_pcf', 'ratio_de', 'ratio_roe', 'ratio_roa')
-
-# Create signals DataFrame
-df_signals <- data.frame(date = unique(df_x$date[df_x$date >= start_test & df_x$date <= end_test]))
-df_signals <- df_signals %>% arrange(date)
-
-# Initialize an empty list for storing accuracy results
-df_signals$acc_total <- NA
-df_signals$acc_current <- NA
-
-for (i in seq_len(nrow(df_signals))) {
-  
-  if (verbose) print(paste('---> doing', df_signals$date[i]))
-  
-  # Training set
-  df_trainx <- df_x %>% filter(date < df_signals$date[i])
-  df_trainx <- df_trainx %>% filter(date != max(date))
-  
-  df_trainy <- df_y %>% filter(date < df_signals$date[i])
-  df_trainy <- df_trainy %>% filter(date != max(date))
-  
-  # Test set
-  df_testx <- df_x %>% filter(date >= df_signals$date[i])
-  df_testy <- df_y %>% filter(date >= df_signals$date[i])
-  
-  # Scale data
-  for (col in list_vars1) {
-    scaler <- function(x) (x - min(x)) / (max(x) - min(x)) * 2 - 1
-    df_trainx[[col]] <- scaler(df_trainx[[col]])
-    df_testx[[col]] <- scaler(df_testx[[col]])
-  }
-  
-  df_trainy <- df_trainy %>% mutate(label = as.factor(label)) 
-  
-  # Fit the Random Forest classifier
-  if (i == 1) {
-    clf <- randomForest(x = df_trainx[list_vars1], y = df_trainy$label, ntree = 10, mtry = sqrt(length(list_vars1)), nodesize = 1000)
-  }
-  
-  # Predictions and accuracy
-  pred_probs <- predict(clf, newdata = df_testx[list_vars1], type = "prob")
-  df_testy$signal <- pred_probs[, 2]
-  df_testy$pred <- ifelse(pred_probs[, 2] > 0.5, 1, 0)
-  df_testy$count <- 1
-  
-  df_current <- df_testy %>% filter(date == df_signals$date[i])
-  
-  acc_total <- mean(df_testy$label == df_testy$pred)
-  acc_current <- mean(df_current$label == df_current$pred)
-  
-  print(paste('---> accuracy test set', round(acc_total, 2), ', accuracy current date', round(acc_current, 2)))
-  
-  # Add accuracy and signal to dataframe
-  df_signals$acc_total[i] <- acc_total
-  df_signals$acc_current[i] <- acc_current
-  
-  df_signals[i, df_current$security] <- df_current$signal
+# Function to calculate momentum
+calculate_momentum <- function(df) {
+  df %>%
+    group_by(security) %>%
+    arrange(date) %>%
+    mutate(momentum = (price / lag(price, lookback_period) - 1) * 100) %>%
+    ungroup()
 }
 
-# Create buy matrix for payoff plot
-df_signals$`10th` <- apply(df_signals[df_sectors$security], 1, function(x) sort(x, decreasing = TRUE)[n_buys])
-df_index <- df_signals[df_sectors$security] >= df_signals$`10th`
+# Prepare data
+df_momentum <- df_data %>%
+  select(date, security, price) %>%
+  calculate_momentum()
 
-# Set 1 for top 10 strongest signals
-df_buys <- as.data.frame(matrix(0, nrow = nrow(df_signals), ncol = length(df_sectors$security)))
-colnames(df_buys) <- df_sectors$security
-df_buys[df_index] <- 1
-
-# keep first 10 obs
-process_row <- function(row) {
-  ones_indices <- which(row == 1)  # Get the indices of 1's
-  if(length(ones_indices) > 10) {
-    row[ones_indices[11:length(ones_indices)]] <- 0  # Set ones after the first 10 to 0
-  }
-  return(row)
+# Modified generate_buy_signals function
+generate_buy_signals <- function(df, n_buys) {
+  df %>%
+    arrange(desc(momentum)) %>%
+    slice_head(n = n_buys) %>%
+    mutate(signal = 1) %>%
+    select(security, signal)
 }
-df_buys <- t(apply(df_buys, 1, process_row))
 
-# add dates
-library(zoo)
-# df_buys <- cbind(date = as.Date(df_signals$date), df_buys)
-df_buys <- cbind(date = df_signals$date, df_buys)
+# Generate signals for all test dates
+df_signals <- df_momentum %>%
+  filter(date >= start_test, date <= end_test) %>%
+  group_by(date) %>%
+  group_modify(~ generate_buy_signals(.x, n_buys)) %>%
+  ungroup()
 
+# Create buy matrix
+df_buys <- df_signals %>%
+  pivot_wider(names_from = security, values_from = signal, values_fill = 0)
 
-# df_buys[,-1] %>% rowSums()
+# Plot heatmap of buy signals
+fig_pixel <- plot_ly(z = as.matrix(df_buys[,-1]), x = colnames(df_buys)[-1], y = df_buys$date, type = "heatmap")
+fig_pixel
 
-
-# Plot signals
-ggplot(df_signals, aes(x = date)) + geom_line(aes(y = AAPL)) + ggtitle("AAPL Signals")
-image(t(df_buys[-1]))  # You might need to use other visualization for the buy signals
-
-# Create return matrix
+# Load returns data
 df_returns <- read.csv('data/returns.csv')
 df_returns$date <- as.Date(df_returns$date)
-df_returns <- df_returns %>% filter(date >= start_test)
-df_returns <- df_returns %>% pivot_wider(names_from = security, values_from = return1)
+df_returns <- df_returns %>% 
+  filter(date >= start_test) %>%
+  pivot_wider(names_from = security, values_from = return1)
 
-plot_payoff <- function(df_buys) {
+# Updated calculate_portfolio_performance function
+calculate_portfolio_performance <- function(df_buys, df_returns) {
+  # Ensure df_buys and df_returns have the same columns, excluding 'date'
+  common_cols <- setdiff(intersect(names(df_buys), names(df_returns)), "date")
+  print("Common columns (excluding 'date'):")
+  print(common_cols)
   
-  df <- df_buys[,-1]
+  df_buys <- df_buys[, c("date", common_cols)]
+  df_returns <- df_returns[, c("date", common_cols)]
   
-  if (sum(rowSums(df) == 10) != nrow(df)) {
-    stop("---> must have exactly 10 buys each day")
-  }
+  # Aggregate data by date to ensure uniqueness
+  df_buys <- df_buys %>%
+    group_by(date) %>%
+    summarise(across(everything(), sum)) %>%
+    ungroup()
+  print("Aggregated df_buys:")
+  print(head(df_buys))
   
-  # df_payoff <- df[, 1, drop = FALSE]
-  df <- df * (1 / n_buys)  # equally weighted
-
-  df_payoff <- NULL
-  arr_ret <- as.matrix(df_returns[-1] + 1)
-  df_payoff$payoff <- diag(df %*% t(arr_ret-1))
-  df_payoff$tri <- cumprod(1+df_payoff$payoff)
+  df_returns <- df_returns %>%
+    group_by(date) %>%
+    summarise(across(everything(), mean)) %>%
+    ungroup()
+  print("Aggregated df_returns:")
+  print(head(df_returns))
   
-  df_payoff$date <- df_returns$date
-  df_payoff <- df_payoff %>% as_tibble()
+  # Align dates
+  df_combined <- inner_join(df_buys, df_returns, by = "date", suffix = c("_buys", "_returns"))
+  print("Combined data frame:")
+  print(head(df_combined))
   
+  # Calculate daily portfolio return
+  df_combined$portfolio_return <- rowSums(df_combined[, paste0(common_cols, "_buys")] * 
+                                            df_combined[, paste0(common_cols, "_returns")], na.rm = TRUE) / n_buys
+  print("Data frame with portfolio return:")
+  print(head(df_combined))
   
-  payoff_result <- (tail(df_payoff$tri, 1) - 1) * 100
-  print(paste("---> payoff for these buys between period", min(df_payoff$date), "and", max(df_payoff$date), "is", round(payoff_result, 2), "%"))
+  # Calculate cumulative return
+  df_combined$cumulative_return <- cumprod(1 + df_combined$portfolio_return)
+  print("Data frame with cumulative return:")
+  print(head(df_combined))
   
-  return(df_payoff)
+  return(df_combined)
 }
 
-df_payoff <- plot_payoff(df_buys)
-ggplot(df_payoff, aes(x = date, y = tri)) + geom_line() + ggtitle("Payoff Over Time")
+# Use the updated function
+df_performance <- calculate_portfolio_performance(df_buys, df_returns)
+
+# Plot performance
+fig_performance <- plot_ly(df_performance, x = ~date, y = ~cumulative_return, type = 'scatter', mode = 'lines')
+fig_performance
+
+# Print final performance
+final_return <- tail(df_performance$cumulative_return, 1)
+print(paste("---> Total return for the momentum strategy between", 
+            min(df_performance$date), "and", max(df_performance$date), 
+            "is", round((final_return - 1) * 100, 2), "%"))
+
+print(paste("---> R Script End", Sys.time()))
+print(paste("---> Total time taken", difftime(Sys.time(), as.POSIXct(start_train), units = "secs")))
 
 
-print('---> R Script End')
+# Load required libraries
+library(tidyverse)
+library(lubridate)
+library(plotly)
+
+print(paste("---> R Script Start", Sys.time()))
+
+# Set up parameters
+start_train <- as.Date("2017-01-01")
+end_train <- as.Date("2023-11-30")
+start_test <- as.Date("2024-01-01")
+end_test <- as.Date("2024-06-30")
+
+n_buys <- 10
+lookback_periods <- c(10, 20, 30, 40, 50)  # Different lookback periods to compare
+
+# Load data
+df_data <- read.csv('data/data1.csv')
+df_data$date <- as.Date(df_data$date)
+
+# Function to calculate momentum
+calculate_momentum <- function(df, lookback_period) {
+  df %>%
+    group_by(security) %>%
+    arrange(date) %>%
+    mutate(momentum = (price / lag(price, lookback_period) - 1) * 100) %>%
+    ungroup()
+}
+
+# Initialize a list to store performance data for each lookback period
+performance_list <- list()
+
+# Loop through different lookback periods
+for (lookback_period in lookback_periods) {
+  # Prepare data
+  df_momentum <- df_data %>%
+    select(date, security, price) %>%
+    calculate_momentum(lookback_period)
+  
+  # Generate signals for all test dates
+  df_signals <- df_momentum %>%
+    filter(date >= start_test, date <= end_test) %>%
+    group_by(date) %>%
+    group_modify(~ generate_buy_signals(.x, n_buys)) %>%
+    ungroup()
+  
+  # Create buy matrix
+  df_buys <- df_signals %>%
+    pivot_wider(names_from = security, values_from = signal, values_fill = 0)
+  
+  # Load returns data
+  df_returns <- read.csv('data/returns.csv')
+  df_returns$date <- as.Date(df_returns$date)
+  df_returns <- df_returns %>% 
+    filter(date >= start_test) %>%
+    pivot_wider(names_from = security, values_from = return1)
+  
+  # Calculate portfolio performance
+  df_performance <- calculate_portfolio_performance(df_buys, df_returns)
+  
+  # Store cumulative return for the current lookback period
+  final_return <- tail(df_performance$cumulative_return, 1)
+  performance_list[[as.character(lookback_period)]] <- (final_return - 1) * 100  # Store as percentage
+}
+
+# Prepare data for plotting
+df_performance_comparison <- data.frame(
+  Lookback_Period = lookback_periods,
+  Total_Return = unlist(performance_list)
+)
+
+# Plotting chunk
+{
+  # Plot the performance comparison
+  fig_comparison <- plot_ly(df_performance_comparison, 
+                            x = ~Lookback_Period, 
+                            y = ~Total_Return, 
+                            type = 'bar', 
+                            name = 'Total Return (%)',
+                            marker = list(color = 'rgba(255, 0, 0, 0.6)'))
+  
+  fig_comparison <- fig_comparison %>%
+    layout(title = "Total Return Comparison by Lookback Period",
+           xaxis = list(title = "Lookback Period (Days)"),
+           yaxis = list(title = "Total Return (%)"))
+  
+  fig_comparison
+}
+
+print(paste("---> R Script End", Sys.time()))
